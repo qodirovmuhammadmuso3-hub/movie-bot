@@ -9,12 +9,16 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
-# DNS muammosini hal qilish uchun Google DNS ishlatamiz (Renderda kerak bo'lmasligi mumkin, lekin zarar qilmaydi)
-try:
-    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
-    dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-except:
-    pass
+# DNS muammosini hal qilish uchun Google DNS ishlatamiz
+def setup_dns():
+    try:
+        import dns.resolver
+        dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+        dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+    except Exception as e:
+        print(f"DNS setup error (not critical): {e}")
+
+setup_dns()
 
 pool = None
 
