@@ -1,0 +1,5 @@
+aiogram
+motor
+python-dotenv
+certifi
+dnspython
