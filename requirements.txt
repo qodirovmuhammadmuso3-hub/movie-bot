@@ -1,7 +1,5 @@
 aiogram
 python-dotenv
-certifi
-dnspython
 asyncpg
 aiosqlite
 aiohttp
