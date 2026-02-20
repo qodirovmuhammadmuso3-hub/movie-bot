@@ -16,8 +16,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 raw_channels = os.getenv("REQUIRED_CHANNELS", "").split(",")
 REQUIRED_CHANNELS = [parse_channel(ch.strip()) for ch in raw_channels if ch.strip()]
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "movie_bot")
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_NAME = os.getenv("DB_NAME", "postgres")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 TRAILER_CH_DATA = parse_channel(os.getenv("TRAILER_CHANNEL", ""))

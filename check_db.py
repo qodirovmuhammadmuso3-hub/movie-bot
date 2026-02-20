@@ -1,12 +1,17 @@
 import asyncio
-from database import movies_collection
+from database import get_latest_movies, init_db
 
 async def check():
-    print("--- MA'LUMOTLAR BAZASI ---")
-    cursor = movies_collection.find().sort("date_added", -1)
-    movies = await cursor.to_list(length=20)
-    for m in movies:
-        print(f"KOD: {m.get('movie_code')} | NOMI: {m.get('title')} | TUR: {m.get('content_type')} | KANAL: {m.get('source_channel')}")
+    print("--- MA'LUMOTLAR BAZASI NI SOZLASH ---")
+    await init_db()
+    print("Jadvallar yaratildi yoki tekshirildi.")
+    
+    print("\n--- OXIRGI QO'SHILGAN KINOLAR ---")
+    movies = await get_latest_movies(10)
+    if not movies:
+        print("Baza bo'sh.")
+    for title, code in movies:
+        print(f"KOD: {code} | NOMI: {title}")
     print("--------------------------")
 
 if __name__ == "__main__":

@@ -6,9 +6,28 @@ from handlers import meta, movies, sync, admin
 from middleware.subscription import SubscriptionMiddleware
 from database import init_db
 
+from aiohttp import web
+import os
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Web server started on port {port}")
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     
+    # Render'da bot o'chib qolmasligi uchun veb-serverni ishga tushiramiz
+    asyncio.create_task(start_web_server())
+
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 

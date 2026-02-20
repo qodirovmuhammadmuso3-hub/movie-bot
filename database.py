@@ -1,157 +1,183 @@
-from motor.motor_asyncio import AsyncIOMotorClient
-from config import MONGODB_URI, DB_NAME, ADMIN_ID
+import asyncpg
 import datetime
+import asyncio
+import dns.resolver
+import os
+from dotenv import load_dotenv
 
-import certifi
-client = AsyncIOMotorClient(MONGODB_URI, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=5000)
-db = client[DB_NAME]
-movies_collection = db["movies"]
-users_collection = db["users"]
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+# DNS muammosini hal qilish uchun Google DNS ishlatamiz (Renderda kerak bo'lmasligi mumkin, lekin zarar qilmaydi)
+try:
+    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+    dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+except:
+    pass
+
+pool = None
+
+async def get_pool():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    return pool
 
 async def init_db():
-    # Title bo'yicha qidiruvni tezlashtirish uchun indeks yaratamiz
-    await movies_collection.create_index([("title", "text")])
-    # Kod bo'yicha qidiruvni tezlashtirish (unikal bo'lishi shart)
-    await movies_collection.create_index("movie_code", unique=True)
-    # Foydalanuvchilar IDsi unikal bo'lishi kerak
-    await users_collection.create_index("user_id", unique=True)
-    # Content type bo'yicha indeks
-    await movies_collection.create_index("content_type")
-    
-    # Eskidan qolgan ma'lumotlarga content_type belgilash (faqat kerak bo'lsa)
-    exists = await movies_collection.find_one({"content_type": {"$exists": False}})
-    if exists:
-        from config import ANIME_CHANNEL
-        # Animelarni ajratib olish
-        await movies_collection.update_many(
-            {"content_type": {"$exists": False}, "source_channel": ANIME_CHANNEL},
-            {"$set": {"content_type": "anime"}}
-        )
-        # Qolganlarini "movie" qilish
-        await movies_collection.update_many(
-            {"content_type": {"$exists": False}},
-            {"$set": {"content_type": "movie"}}
-        )
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                full_name TEXT,
+                username TEXT,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS movies (
+                movie_code TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                release_year TEXT,
+                genre TEXT,
+                duration TEXT,
+                file_id TEXT NOT NULL,
+                post_link TEXT,
+                source_channel TEXT,
+                is_series BOOLEAN DEFAULT FALSE,
+                episode_number INTEGER,
+                content_type TEXT DEFAULT 'movie',
+                media_type TEXT DEFAULT 'video',
+                date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                request_count INTEGER DEFAULT 0
+            )
+        ''')
 
 async def get_next_movie_code(content_type="movie"):
-    """
-    content_type: 'movie' yoki 'anime'
-    movie: 001, 002...
-    anime: 1, 2...
-    """
-    pipeline = [
-        {"$match": {"content_type": content_type}},
-        {"$project": {"code_int": {"$toInt": "$movie_code"}}},
-        {"$sort": {"code_int": -1}},
-        {"$limit": 1}
-    ]
-    cursor = movies_collection.aggregate(pipeline)
-    result = await cursor.to_list(length=1)
-    
-    if not result:
-        return "001" if content_type == "movie" else "1"
-    
-    next_val = result[0]["code_int"] + 1
-    
-    if content_type == "movie":
-        return str(next_val).zfill(3)
-    return str(next_val)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow('''
+            SELECT movie_code FROM movies 
+            WHERE content_type = $1 AND movie_code ~ '^[0-9]+$'
+            ORDER BY movie_code::INTEGER DESC LIMIT 1
+        ''', content_type)
+        
+        if not row:
+            return "001" if content_type == "movie" else "1"
+        
+        last_code = int(row['movie_code'])
+        next_val = last_code + 1
+        if content_type == "movie":
+            return str(next_val).zfill(3)
+        return str(next_val)
 
 async def add_user(user_id, full_name, username):
-    await users_collection.update_one(
-        {"user_id": user_id},
-        {"$set": {
-            "full_name": full_name,
-            "username": username,
-            "last_active": datetime.datetime.utcnow()
-        }},
-        upsert=True
-    )
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users (user_id, full_name, username, last_active)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                full_name = EXCLUDED.full_name,
+                username = EXCLUDED.username,
+                last_active = EXCLUDED.last_active
+        ''', user_id, full_name, username, datetime.datetime.utcnow())
 
 async def get_stats():
-    total_users = await users_collection.count_documents({})
-    total_movies = await movies_collection.count_documents({})
-    return total_users, total_movies
+    p = await get_pool()
+    async with p.acquire() as conn:
+        total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+        total_movies = await conn.fetchval('SELECT COUNT(*) FROM movies')
+        return total_users, total_movies
 
 async def get_all_users():
-    cursor = users_collection.find({}, {"user_id": 1})
-    return await cursor.to_list(length=None)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch('SELECT user_id FROM users')
+        return [dict(row) for row in rows]
 
 async def add_movie(movie_code, title, year, genre, duration, file_id, post_link, source_channel, is_series=False, episode_number=None, content_type="movie", media_type="video"):
-    # Kino bo'lsa raqamni padding qilamiz (001 formatiga)
     search_code = str(movie_code).strip()
     if content_type == "movie" and search_code.isdigit() and len(search_code) < 3:
         search_code = search_code.zfill(3)
-        
-    movie_doc = {
-        "movie_code": search_code,
-        "title": title.strip(),
-        "release_year": year,
-        "genre": genre,
-        "duration": duration,
-        "file_id": file_id,
-        "post_link": post_link,
-        "source_channel": source_channel,
-        "is_series": is_series,
-        "episode_number": episode_number,
-        "content_type": content_type,
-        "media_type": media_type,
-        "date_added": datetime.datetime.utcnow(),
-        "request_count": 0
-    }
-    await movies_collection.insert_one(movie_doc)
+    
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO movies (
+                movie_code, title, release_year, genre, duration, file_id, post_link, source_channel, 
+                is_series, episode_number, content_type, media_type, date_added, request_count
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (movie_code) DO NOTHING
+        ''', search_code, title.strip(), year, genre, duration, file_id, post_link, source_channel,
+              is_series, episode_number, content_type, media_type, datetime.datetime.utcnow(), 0)
 
 async def get_episodes(title):
-    cursor = movies_collection.find({"title": title.strip(), "is_series": True}).sort("episode_number", 1)
-    return await cursor.to_list(length=None)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT * FROM movies WHERE title = $1 AND is_series = TRUE ORDER BY episode_number ASC
+        ''', title.strip())
+        return [dict(row) for row in rows]
 
 async def get_movie_by_code(code: str, content_type: str | None = None):
     search_code = str(code).strip()
-    
-    # 1. Qat'iy qidiruv
-    query = {"movie_code": search_code}
-    if content_type:
-        query["content_type"] = content_type
-    
-    res = await movies_collection.find_one(query)
-    
-    # 2. Agar movie qidirilayotgan bo'lsa va topilmasa, padding qilib ko'ramiz
-    if not res and (not content_type or content_type == "movie") and search_code.isdigit() and len(search_code) < 3:
-        padded_code = search_code.zfill(3)
-        res = await movies_collection.find_one({"movie_code": padded_code, "content_type": "movie"})
+    p = await get_pool()
+    async with p.acquire() as conn:
+        if content_type:
+            row = await conn.fetchrow('SELECT * FROM movies WHERE movie_code = $1 AND content_type = $2', search_code, content_type)
+        else:
+            row = await conn.fetchrow('SELECT * FROM movies WHERE movie_code = $1', search_code)
         
-    # 3. Agar hali ham topilmasa va content_type berilmagan bo'lsa, har qandayini qidiramiz
-    if not res and not content_type:
-        res = await movies_collection.find_one({"movie_code": search_code})
-            
-    return res
+        if row:
+            return dict(row)
+        
+        # Padding search
+        if (not content_type or content_type == "movie") and search_code.isdigit() and len(search_code) < 3:
+            padded_code = search_code.zfill(3)
+            row = await conn.fetchrow('SELECT * FROM movies WHERE movie_code = $1 AND content_type = \'movie\'', padded_code)
+            if row:
+                return dict(row)
+                
+    return None
 
 async def search_movies(query, content_type=None):
-    filter_query = {"title": {"$regex": query, "$options": "i"}}
-    if content_type:
-        filter_query["content_type"] = content_type
-    cursor = movies_collection.find(filter_query)
-    return await cursor.to_list(length=10)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        sql = 'SELECT * FROM movies WHERE title ILIKE $1'
+        params = [f'%{query}%']
+        if content_type:
+            sql += ' AND content_type = $2'
+            params.append(content_type)
+        sql += ' LIMIT 10'
+        
+        rows = await conn.fetch(sql, *params)
+        return [dict(row) for row in rows]
 
 async def increment_request_count(movie_code):
-    await movies_collection.update_one(
-        {"movie_code": str(movie_code)},
-        {"$inc": {"request_count": 1}}
-    )
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute('UPDATE movies SET request_count = request_count + 1 WHERE movie_code = $1', str(movie_code))
 
 async def get_latest_movies(limit=10):
-    cursor = movies_collection.find().sort("date_added", -1).limit(limit)
-    movies = await cursor.to_list(length=limit)
-    return [(m["title"], m["movie_code"]) for m in movies]
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch('SELECT title, movie_code FROM movies ORDER BY date_added DESC LIMIT $1', limit)
+        return [(row['title'], row['movie_code']) for row in rows]
 
 async def get_top_movies(limit=10):
-    cursor = movies_collection.find().sort("request_count", -1).limit(limit)
-    movies = await cursor.to_list(length=limit)
-    return [(m["title"], m["movie_code"]) for m in movies]
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch('SELECT title, movie_code FROM movies ORDER BY request_count DESC LIMIT $1', limit)
+        return [(row['title'], row['movie_code']) for row in rows]
 
 async def update_movie_field(movie_code, update_data):
-    """Bazadagi kontent ma'lumotlarini yangilash."""
-    await movies_collection.update_one(
-        {"movie_code": str(movie_code)},
-        {"$set": update_data}
-    )
+    if not update_data:
+        return
+    p = await get_pool()
+    async with p.acquire() as conn:
+        set_clauses = [f"{k} = ${i+2}" for i, k in enumerate(update_data.keys())]
+        sql = f"UPDATE movies SET {', '.join(set_clauses)} WHERE movie_code = $1"
+        params = [str(movie_code)] + list(update_data.values())
+        await conn.execute(sql, *params)

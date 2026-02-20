@@ -7,3 +7,9 @@ venv/
 env/
 transcriptions/
 downloads/
+database.sqlite
+test_*.py
+db_output.txt
+errors.log
+bot_error.log
+https_results.txt
