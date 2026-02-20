@@ -2,8 +2,10 @@ import asyncio
 from database import get_pool, init_db
 
 async def normalize_database():
+    print("\n" + "="*50)
+    print("SKRIPT ISHGA TUSHDI: POSTGRESQL VERSIYASI")
+    print("="*50 + "\n")
     await init_db()
-    print("Bazani normalizatsiya qilish boshlandi...")
     
     p = await get_pool()
     async with p.acquire() as conn:
